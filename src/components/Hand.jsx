@@ -1,214 +1,371 @@
-// src/components/Hand.jsx
-import React, { useState, useEffect } from "react";
-import { X } from "lucide-react";
-import useGameStore from "../store/gameStore";
-import Card from "./Card";
-import networkManager from "../network/NetworkManager";
+// src/store/gameStore.js
+import { create } from "zustand";
+import { getDeck } from "../game/deck";
+import { VARIANTS, TYPES, COLORS } from "../game/constants";
 
-const Hand = ({ myPlayerIndex }) => {
-  const {
-    players,
-    currentPlayerIndex,
-    playCard,
-    isDarkSide,
-    activeColor,
-    discardPile,
-    gameState,
-    accumulatedPenalty,
-    rules,
-  } = useGameStore();
+const useGameStore = create((set, get) => ({
+  // ------------------------------------------------------
+  // 1. GAME STATE
+  // ------------------------------------------------------
+  gameState: "LOBBY",
+  variant: VARIANTS.CLASSIC,
+  rules: {
+    stacking: true,
+    sevenZero: false,
+    jumpIn: false,
+  },
 
-  const [pendingWildIndex, setPendingWildIndex] = useState(null);
-  const [screenWidth, setScreenWidth] = useState(1000);
+  deck: [],
+  discardPile: [],
+  players: [],
 
-  // --- LIVE SCREEN SIZE TRACKING ---
-  useEffect(() => {
-    setScreenWidth(window.innerWidth);
-    const handleResize = () => setScreenWidth(window.innerWidth);
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  // --- ANIMATION STATE ---
+  animations: [],
 
-  const myHand = players[myPlayerIndex]?.hand || [];
-  const isMyTurn =
-    currentPlayerIndex === myPlayerIndex && gameState === "PLAYING";
-  const topCard = discardPile[discardPile.length - 1];
+  currentPlayerIndex: 0,
+  direction: 1, // 1 = Clockwise, -1 = Counter-Clockwise
+  activeColor: null,
+  accumulatedPenalty: 0,
+  isDarkSide: false,
+  winner: null,
 
-  const checkPlayable = (card) => {
-    if (!isMyTurn) return false;
-    if (!topCard) return false;
+  // Who am I in this device?
+  myPlayerIndex: 0,
+  setMyPlayerIndex: (idx) => set({ myPlayerIndex: idx }),
 
-    const currentCard = isDarkSide ? card.back : card;
-    const currentTop = isDarkSide ? topCard.back : topCard;
+  // ------------------------------------------------------
+  // 2. ACTIONS
+  // ------------------------------------------------------
+
+  // CRITICAL: Synchronizes the exact game state from Host to Joiners
+  syncState: (payload) => {
+    set({ ...payload });
+  },
+
+  // --- ANIMATION TRIGGER ---
+  triggerAnimation: (type, card, playerIndex) => {
+    const animId = Math.random().toString();
+
+    set((state) => ({
+      animations: [
+        ...state.animations,
+        { id: animId, type, card, playerIndex },
+      ],
+    }));
+
+    setTimeout(() => {
+      set((state) => ({
+        animations: state.animations.filter((a) => a.id !== animId),
+      }));
+    }, 600);
+  },
+
+  startGame: (variant, players, rules) => {
+    const deck = getDeck(variant);
+
+    // Deal 7 cards to each player and add UNO tracking
+    players.forEach((p) => {
+      p.hand = deck.splice(0, 7);
+      p.unoCalled = false; // Add safety tracker
+    });
+
+    const firstCard = deck.shift();
+
+    set({
+      gameState: "PLAYING",
+      variant,
+      rules: rules || get().rules,
+      deck,
+      discardPile: [firstCard],
+      players,
+      animations: [],
+      currentPlayerIndex: 0,
+      direction: 1,
+      activeColor:
+        firstCard.color === COLORS.BLACK ? COLORS.RED : firstCard.color,
+      accumulatedPenalty: 0,
+      isDarkSide: false,
+      winner: null,
+    });
+  },
+
+  pressUno: (callerId) => {
+    const { players, deck } = get();
+    let newPlayers = [...players];
+    let currentDeck = [...deck];
+    let caughtSomeone = false;
+
+    // 1. Can we catch anyone?
+    newPlayers.forEach((p, idx) => {
+      if (p.id !== callerId && p.hand.length === 1 && !p.unoCalled) {
+        // Draw 2 penalty cards!
+        const penaltyCards = currentDeck.splice(0, 2);
+        p.hand = [...p.hand, ...penaltyCards];
+        p.unoCalled = false;
+        caughtSomeone = true;
+
+        penaltyCards.forEach((c, i) => {
+          setTimeout(() => get().triggerAnimation("draw", c, idx), i * 250);
+        });
+      }
+    });
+
+    // 2. If no one was caught, try to make the caller "Safe"
+    if (!caughtSomeone) {
+      const callerIndex = newPlayers.findIndex((p) => p.id === callerId);
+      if (callerIndex !== -1 && newPlayers[callerIndex].hand.length <= 2) {
+        newPlayers[callerIndex].unoCalled = true;
+      }
+    }
+
+    set({ players: newPlayers, deck: currentDeck });
+  },
+
+  playCard: (playerIndex, cardIndex, chosenColor = null) => {
+    const state = get();
+    const {
+      players,
+      currentPlayerIndex,
+      discardPile,
+      rules,
+      activeColor,
+      accumulatedPenalty,
+      isDarkSide,
+    } = state;
+
+    const player = players[playerIndex];
+    const card = player.hand[cardIndex];
+
+    const currentCard = isDarkSide && card.back ? card.back : card;
+    const topCardRaw = discardPile[discardPile.length - 1];
+    const topCard =
+      isDarkSide && topCardRaw.back ? topCardRaw.back : topCardRaw;
+
+    // --- 1. JUMP-IN CHECK ---
+    const isMyTurn = currentPlayerIndex === playerIndex;
+    let isJumpIn = false;
+
+    if (!isMyTurn && rules.jumpIn) {
+      if (
+        currentCard.color !== COLORS.BLACK &&
+        currentCard.color === topCard.color
+      ) {
+        if (currentCard.value !== null && currentCard.value === topCard.value)
+          isJumpIn = true;
+        if (
+          currentCard.type !== TYPES.NUMBER &&
+          currentCard.type === topCard.type
+        )
+          isJumpIn = true;
+      }
+    }
+
+    if (!isMyTurn && !isJumpIn) return false;
+
+    // --- 2. STANDARD VALIDATION ---
+    let isValid = false;
 
     if (accumulatedPenalty > 0) {
-      if (rules.stacking && currentCard.type === currentTop.type) return true;
-      return false;
+      if (rules.stacking && currentCard.type === topCard.type) isValid = true;
+      else return false;
+    } else {
+      if (currentCard.color === COLORS.BLACK) isValid = true;
+      else if (currentCard.color === activeColor) isValid = true;
+      else if (
+        currentCard.value !== null &&
+        currentCard.value === topCard.value
+      )
+        isValid = true;
+      else if (
+        currentCard.type !== TYPES.NUMBER &&
+        currentCard.type === topCard.type
+      )
+        isValid = true;
     }
 
-    if (currentCard.color === "black") return true;
-    if (currentCard.color === activeColor) return true;
-    if (currentCard.value !== null && currentCard.value === currentTop.value)
-      return true;
-    if (currentCard.type !== "NUMBER" && currentCard.type === currentTop.type)
-      return true;
+    if (!isValid) return false;
 
-    return false;
-  };
+    // --- TRIGGER PLAY ANIMATION ---
+    get().triggerAnimation("play", currentCard, playerIndex);
 
-  const handleCardClick = (card, originalIndex) => {
-    if (checkPlayable(card)) {
-      const currentCard = isDarkSide ? card.back : card;
-      if (currentCard.color === "black") {
-        setPendingWildIndex(originalIndex);
-        return;
-      }
-      executePlay(originalIndex, null);
+    // --- 3. EXECUTE MOVE ---
+    const newHand = player.hand.filter((_, i) => i !== cardIndex);
+    let newPlayers = [...players];
+    newPlayers[playerIndex] = { ...player, hand: newHand };
+
+    if (newHand.length > 1) {
+      newPlayers[playerIndex].unoCalled = false;
     }
-  };
 
-  const executePlay = (originalIndex, chosenColor) => {
-    playCard(myPlayerIndex, originalIndex, chosenColor);
-    networkManager.send("PLAY_CARD", {
-      playerIndex: myPlayerIndex,
-      cardIndex: originalIndex,
-      chosenColor,
+    const newDiscard = [...discardPile, card];
+
+    if (newHand.length === 0) {
+      set({
+        winner: player.name,
+        gameState: "GAME_OVER",
+        players: newPlayers,
+        discardPile: newDiscard,
+      });
+      return true;
+    }
+
+    if (isJumpIn) set({ currentPlayerIndex: playerIndex });
+
+    // SET THE CHOSEN COLOR HERE
+    set({
+      players: newPlayers,
+      discardPile: newDiscard,
+      activeColor:
+        chosenColor ||
+        (currentCard.color === COLORS.BLACK ? COLORS.RED : currentCard.color),
     });
-    setPendingWildIndex(null);
-  };
 
-  const colorOptions = isDarkSide
-    ? [
-        { id: "teal", bg: "bg-[#00897B]", border: "border-[#004D40]" },
-        { id: "pink", bg: "bg-[#D81B60]", border: "border-[#880E4F]" },
-        { id: "purple", bg: "bg-[#8E24AA]", border: "border-[#4A148C]" },
-        { id: "orange", bg: "bg-[#F4511E]", border: "border-[#BF360C]" },
-      ]
-    : [
-        { id: "red", bg: "bg-[#E53935]", border: "border-[#B71C1C]" },
-        { id: "blue", bg: "bg-[#1E88E5]", border: "border-[#0D47A1]" },
-        { id: "green", bg: "bg-[#43A047]", border: "border-[#1B5E20]" },
-        { id: "yellow", bg: "bg-[#FFB300]", border: "border-[#FF8F00]" },
-      ];
+    get().applyCardEffect(currentCard, playerIndex);
+    return true;
+  },
 
-  // --- IMPROVED VISIBILITY MATH ---
-  const scale = screenWidth < 768 ? 0.75 : 1;
-  const effectiveWidth = screenWidth / scale;
+  applyCardEffect: (cardData, playedByIndex) => {
+    let nextTurnSkip = 0;
+    const { rules, direction, players } = get();
 
-  // REQUIRE at least 50px of visible space per card (more than half the card's width!)
-  const maxCardsPerRow = Math.max(4, Math.floor((effectiveWidth - 100) / 50));
+    // 7-0 Rule Handling
+    if (rules.sevenZero && cardData.type === TYPES.NUMBER) {
+      if (cardData.value === 0) {
+        let newPlayers = [...get().players];
+        const hands = newPlayers.map((p) => p.hand);
+        const unoStatuses = newPlayers.map((p) => p.unoCalled);
 
-  const numRows = Math.ceil(myHand.length / maxCardsPerRow) || 1;
-  const cardsPerRow = Math.ceil(myHand.length / numRows);
+        newPlayers.forEach((p, idx) => {
+          let fromIdx = (idx - direction + players.length) % players.length;
+          p.hand = hands[fromIdx];
+          p.unoCalled = unoStatuses[fromIdx];
+        });
+        set({ players: newPlayers });
+      } else if (cardData.value === 7) {
+        let newPlayers = [...get().players];
+        const nextIdx =
+          (playedByIndex + direction + players.length) % players.length;
 
-  const rows = [];
-  for (let i = 0; i < numRows; i++) {
-    rows.push(
-      myHand.slice(i * cardsPerRow, (i + 1) * cardsPerRow).map((card, idx) => ({
-        card,
-        originalIndex: i * cardsPerRow + idx,
-      })),
-    );
-  }
+        const tempHand = [...newPlayers[playedByIndex].hand];
+        const tempUno = newPlayers[playedByIndex].unoCalled;
 
-  return (
-    <>
-      {/* COLOR PICKER MODAL */}
-      {pendingWildIndex !== null && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in px-4">
-          <div className="bg-[#FFF8E1] p-6 rounded-3xl border-4 border-[#FFECB3] shadow-2xl flex flex-col items-center relative w-full max-w-[300px]">
-            <button
-              onClick={() => setPendingWildIndex(null)}
-              className="absolute -top-4 -right-4 bg-red-500 text-white p-2 rounded-full border-4 border-white shadow-md hover:scale-110 active:scale-95"
-            >
-              <X size={20} strokeWidth={4} />
-            </button>
-            <h3 className="text-2xl font-black text-[#3E2723] mb-6 text-center">
-              Choose Color
-            </h3>
-            <div className="grid grid-cols-2 gap-4 w-full">
-              {colorOptions.map((color) => (
-                <button
-                  key={color.id}
-                  onClick={() => executePlay(pendingWildIndex, color.id)}
-                  className={`w-full aspect-square rounded-2xl ${color.bg} ${color.border} border-b-8 shadow-lg active:border-b-0 active:translate-y-2 hover:brightness-110 transition-all`}
-                ></button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+        newPlayers[playedByIndex].hand = [...newPlayers[nextIdx].hand];
+        newPlayers[playedByIndex].unoCalled = newPlayers[nextIdx].unoCalled;
 
-      {/* CARD HAND SYSTEM */}
-      <div className="absolute bottom-0 left-0 w-full flex flex-col items-center justify-end pointer-events-none z-50">
-        <div className="relative w-full pb-4 sm:pb-8 flex flex-col items-center justify-end scale-[0.75] sm:scale-100 origin-bottom">
-          {rows.map((row, rowIndex) => {
-            const rowMiddleIndex = (row.length - 1) / 2;
+        newPlayers[nextIdx].hand = tempHand;
+        newPlayers[nextIdx].unoCalled = tempUno;
 
-            // Reduced vertical overlap! Back rows are now much higher and easier to see.
-            const marginTop = rowIndex === 0 ? "0px" : "-45px";
+        set({ players: newPlayers });
+      }
+    }
 
-            return (
-              <div
-                key={rowIndex}
-                style={{ marginTop, zIndex: rowIndex * 10 }}
-                className="flex justify-center items-end pointer-events-auto relative"
-              >
-                {row.map((item, index) => {
-                  const isPlayable = checkPlayable(item.card);
+    // Standard Actions
+    switch (cardData.type) {
+      case TYPES.REVERSE:
+        set((state) => ({ direction: state.direction * -1 }));
+        if (get().players.length === 2) nextTurnSkip = 1; // Reverse = Skip in 2-player
+        break;
 
-                  // Reduced horizontal overlap! Capped at 46px, meaning 50px is ALWAYS showing.
-                  const overlap = Math.min(46, 5 + row.length * 3.5);
-                  const marginLeft = index === 0 ? "0px" : `-${overlap}px`;
+      case TYPES.SKIP:
+      case TYPES.SKIP_EVERYONE: // No Mercy
+        nextTurnSkip = 1;
+        break;
 
-                  // Gentler fan angle so tilted corners don't cover neighboring numbers
-                  let rotation = (index - rowMiddleIndex) * 2;
-                  rotation = Math.max(-20, Math.min(20, rotation));
+      case TYPES.DRAW_2:
+        set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 2 }));
+        break;
 
-                  const translateY =
-                    Math.abs(index - rowMiddleIndex) *
-                    (row.length > 10 ? 1 : 2);
+      case TYPES.WILD_DRAW_4:
+        set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 4 }));
+        break;
 
-                  return (
-                    <div
-                      key={item.card.id}
-                      style={{
-                        marginLeft,
-                        zIndex: item.originalIndex,
-                        transform: `rotate(${rotation}deg) translateY(${translateY}px)`,
-                        transformOrigin: "bottom center",
-                      }}
-                      className="relative group hover:z-[100]"
-                    >
-                      <div
-                        className={`transition-all duration-300 group
-                        ${isPlayable ? "hover:-translate-y-12 sm:hover:-translate-y-16 hover:scale-110 cursor-pointer shadow-lg" : "opacity-90 brightness-75"}
-                      `}
-                      >
-                        <Card
-                          card={item.card}
-                          isDarkSide={isDarkSide}
-                          onClick={() =>
-                            handleCardClick(item.card, item.originalIndex)
-                          }
-                          isPlayable={isPlayable}
-                        />
-                        {isPlayable && (
-                          <div className="absolute inset-0 bg-green-400 blur-xl opacity-0 group-hover:opacity-40 rounded-xl -z-10 transition-opacity pointer-events-none"></div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-};
+      // --- ADDED FLIP & NO MERCY PENALTIES ---
+      case TYPES.DRAW_5:
+        set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 5 }));
+        break;
 
-export default Hand;
+      case TYPES.DRAW_6:
+      case TYPES.WILD_DRAW_6:
+        set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 6 }));
+        break;
 
-//
+      case TYPES.DRAW_10:
+      case TYPES.WILD_DRAW_10:
+        set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 10 }));
+        break;
+
+      case TYPES.FLIP:
+        set((state) => {
+          const nextDarkSide = !state.isDarkSide;
+          const topCardRaw = state.discardPile[state.discardPile.length - 1];
+          const newFace =
+            nextDarkSide && topCardRaw.back ? topCardRaw.back : topCardRaw;
+
+          return {
+            isDarkSide: nextDarkSide,
+            activeColor:
+              newFace.color === COLORS.BLACK ? COLORS.RED : newFace.color,
+          };
+        });
+        break;
+    }
+
+    get().advanceTurn(nextTurnSkip);
+  },
+
+  drawCard: (playerId) => {
+    const { deck, players, currentPlayerIndex, accumulatedPenalty } = get();
+
+    const pIndex = players.findIndex((p) => p.id === playerId);
+
+    if (pIndex !== currentPlayerIndex) return;
+
+    let cardsToDraw = accumulatedPenalty > 0 ? accumulatedPenalty : 1;
+    let currentDeck = [...deck];
+    let drawnCards = [];
+
+    for (let i = 0; i < cardsToDraw; i++) {
+      if (currentDeck.length === 0) break; // Needs reshuffle logic in a full app
+      drawnCards.push(currentDeck.shift());
+    }
+
+    // --- SMART ANIMATION TIMING ---
+    // If drawing +10, speed up the animation so it doesn't take 3 seconds!
+    const animDelay = cardsToDraw > 4 ? 120 : 250;
+
+    drawnCards.forEach((c, idx) => {
+      setTimeout(() => {
+        get().triggerAnimation("draw", c, pIndex);
+      }, idx * animDelay);
+    });
+
+    const newPlayers = [...players];
+    newPlayers[currentPlayerIndex].hand = [
+      ...newPlayers[currentPlayerIndex].hand,
+      ...drawnCards,
+    ];
+    newPlayers[currentPlayerIndex].unoCalled = false;
+
+    set({
+      deck: currentDeck,
+      players: newPlayers,
+      accumulatedPenalty: 0,
+    });
+
+    get().advanceTurn();
+  },
+
+  advanceTurn: (skipCount = 0) => {
+    const { players, currentPlayerIndex, direction } = get();
+    const len = players.length;
+
+    let steps = 1 + skipCount;
+    let nextIndex = currentPlayerIndex + steps * direction;
+
+    nextIndex = ((nextIndex % len) + len) % len;
+
+    set({ currentPlayerIndex: nextIndex });
+  },
+}));
+
+export default useGameStore;

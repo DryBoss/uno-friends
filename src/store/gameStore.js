@@ -43,7 +43,6 @@ const useGameStore = create((set, get) => ({
   },
 
   // --- ANIMATION TRIGGER ---
-  // --- ANIMATION TRIGGER ---
   triggerAnimation: (type, card, playerIndex) => {
     const animId = Math.random().toString();
 
@@ -108,9 +107,9 @@ const useGameStore = create((set, get) => ({
         p.unoCalled = false;
         caughtSomeone = true;
 
-        // Animate the penalty cards flying to them
+        // Animate the penalty cards flying to them (Smoothed to 250ms)
         penaltyCards.forEach((c, i) => {
-          setTimeout(() => get().triggerAnimation("draw", c, idx), i * 150);
+          setTimeout(() => get().triggerAnimation("draw", c, idx), i * 250);
         });
       }
     });
@@ -288,8 +287,23 @@ const useGameStore = create((set, get) => ({
         set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 4 }));
         break;
 
+      // --- CRITICAL BUG FIX FOR THE FLIP CARD ---
       case TYPES.FLIP:
-        set((state) => ({ isDarkSide: !state.isDarkSide }));
+        set((state) => {
+          const nextDarkSide = !state.isDarkSide;
+          // Look at the card we just put on the discard pile
+          const topCardRaw = state.discardPile[state.discardPile.length - 1];
+          // Get the newly revealed face of that card
+          const newFace =
+            nextDarkSide && topCardRaw.back ? topCardRaw.back : topCardRaw;
+
+          return {
+            isDarkSide: nextDarkSide,
+            // Automatically switch the active color to match the new back of the Flip card
+            activeColor:
+              newFace.color === COLORS.BLACK ? COLORS.RED : newFace.color,
+          };
+        });
         break;
     }
 
@@ -315,11 +329,11 @@ const useGameStore = create((set, get) => ({
       drawnCards.push(currentDeck.shift());
     }
 
-    // --- TRIGGER STAGGERED DRAW ANIMATIONS ---
+    // --- TRIGGER STAGGERED DRAW ANIMATIONS (Smoothed to 250ms) ---
     drawnCards.forEach((c, idx) => {
       setTimeout(() => {
         get().triggerAnimation("draw", c, pIndex);
-      }, idx * 100); // 100ms delay between cards flying
+      }, idx * 250);
     });
 
     const newPlayers = [...players];
