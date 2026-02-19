@@ -5,161 +5,280 @@ import { VARIANTS, TYPES, COLORS } from "../game/constants";
 
 const useGameStore = create((set, get) => ({
   // ------------------------------------------------------
-  // 1. GAME STATE (The "Truth")
+  // 1. GAME STATE
   // ------------------------------------------------------
-  gameState: "LOBBY", // LOBBY, PLAYING, GAME_OVER
+  gameState: "LOBBY",
   variant: VARIANTS.CLASSIC,
+  rules: {
+    stacking: true,
+    sevenZero: false,
+    jumpIn: false,
+  },
 
   deck: [],
   discardPile: [],
-  players: [], // [{ id: 'p1', name: 'Host', hand: [] }, ...]
+  players: [],
+
+  // --- ANIMATION STATE ---
+  animations: [],
 
   currentPlayerIndex: 0,
   direction: 1, // 1 = Clockwise, -1 = Counter-Clockwise
-  activeColor: null, // Tracks current color (important for Wilds)
-
-  // Special Mechanics
-  accumulatedPenalty: 0, // For stacking (+2, +4)
-  isDarkSide: false, // For Flip Uno
+  activeColor: null,
+  accumulatedPenalty: 0,
+  isDarkSide: false,
   winner: null,
 
+  // Who am I in this device?
+  myPlayerIndex: 0,
+  setMyPlayerIndex: (idx) => set({ myPlayerIndex: idx }),
+
   // ------------------------------------------------------
-  // 2. ACTIONS (Changing the State)
+  // 2. ACTIONS
   // ------------------------------------------------------
 
-  /**
-   * START GAME
-   * Called by Host when clicking "Start"
-   */
-  startGame: (variant, players) => {
+  // CRITICAL: Synchronizes the exact game state from Host to Joiners
+  syncState: (payload) => {
+    set({ ...payload });
+  },
+
+  // --- ANIMATION TRIGGER ---
+  triggerAnimation: (type, card, playerIndex) => {
+    const isMe = playerIndex === get().myPlayerIndex;
+    const animId = Math.random().toString();
+
+    set((state) => ({
+      animations: [...state.animations, { id: animId, type, card, isMe }],
+    }));
+
+    // Remove the ghost card after the CSS animation finishes (400ms)
+    setTimeout(() => {
+      set((state) => ({
+        animations: state.animations.filter((a) => a.id !== animId),
+      }));
+    }, 400);
+  },
+
+  startGame: (variant, players, rules) => {
     const deck = getDeck(variant);
 
-    // Deal 7 cards to each player
+    // Deal 7 cards to each player and add UNO tracking
     players.forEach((p) => {
       p.hand = deck.splice(0, 7);
+      p.unoCalled = false; // Add safety tracker
     });
 
-    // Flip first card
     const firstCard = deck.shift();
-    const discardPile = [firstCard];
 
     set({
       gameState: "PLAYING",
       variant,
+      rules: rules || get().rules, // Save custom house rules
       deck,
-      discardPile,
+      discardPile: [firstCard],
       players,
+      animations: [], // Reset animations
       currentPlayerIndex: 0,
       direction: 1,
       activeColor:
-        firstCard.color === COLORS.BLACK ? COLORS.RED : firstCard.color, // Default Wild to Red
+        firstCard.color === COLORS.BLACK ? COLORS.RED : firstCard.color,
       accumulatedPenalty: 0,
       isDarkSide: false,
       winner: null,
     });
   },
 
-  /**
-   * PLAY CARD
-   * Validates and executes a move.
-   * NOTE: This is called after the Network confirms the move is valid.
-   */
-  playCard: (playerId, cardIndex) => {
+  // --- THE UNO BUTTON LOGIC ---
+  pressUno: (callerId) => {
+    const { players, deck } = get();
+    let newPlayers = [...players];
+    let currentDeck = [...deck];
+    let caughtSomeone = false;
+
+    // 1. Can we catch anyone?
+    newPlayers.forEach((p, idx) => {
+      // If they have 1 card, are NOT the caller, and forgot to call UNO
+      if (p.id !== callerId && p.hand.length === 1 && !p.unoCalled) {
+        // Draw 2 penalty cards!
+        const penaltyCards = currentDeck.splice(0, 2);
+        p.hand = [...p.hand, ...penaltyCards];
+        p.unoCalled = false;
+        caughtSomeone = true;
+
+        // Animate the penalty cards flying to them
+        penaltyCards.forEach((c, i) => {
+          setTimeout(() => get().triggerAnimation("draw", c, idx), i * 150);
+        });
+      }
+    });
+
+    // 2. If no one was caught, try to make the caller "Safe"
+    if (!caughtSomeone) {
+      const callerIndex = newPlayers.findIndex((p) => p.id === callerId);
+      if (callerIndex !== -1 && newPlayers[callerIndex].hand.length <= 2) {
+        newPlayers[callerIndex].unoCalled = true;
+      }
+    }
+
+    set({ players: newPlayers, deck: currentDeck });
+  },
+
+  // Update the function signature to accept chosenColor
+  playCard: (playerIndex, cardIndex, chosenColor = null) => {
+    const state = get();
     const {
       players,
       currentPlayerIndex,
       discardPile,
-      direction,
+      rules,
       activeColor,
       accumulatedPenalty,
       isDarkSide,
-    } = get();
+    } = state;
 
-    const player = players[currentPlayerIndex];
-
-    // Security Check: Is it actually this player's turn?
-    if (player.id !== playerId) return false;
-
+    const player = players[playerIndex];
     const card = player.hand[cardIndex];
 
-    // If we are in Dark Side mode, we look at the BACK of the card
-    const currentCard = isDarkSide ? card.back : card;
-    const topCard = isDarkSide
-      ? discardPile[discardPile.length - 1].back
-      : discardPile[discardPile.length - 1];
+    const currentCard = isDarkSide && card.back ? card.back : card;
+    const topCardRaw = discardPile[discardPile.length - 1];
+    const topCard =
+      isDarkSide && topCardRaw.back ? topCardRaw.back : topCardRaw;
 
-    // --- VALIDATION LOGIC ---
+    // --- 1. JUMP-IN CHECK ---
+    const isMyTurn = currentPlayerIndex === playerIndex;
+    let isJumpIn = false;
+
+    if (!isMyTurn && rules.jumpIn) {
+      if (
+        currentCard.color !== COLORS.BLACK &&
+        currentCard.color === topCard.color
+      ) {
+        if (currentCard.value !== null && currentCard.value === topCard.value)
+          isJumpIn = true;
+        if (
+          currentCard.type !== TYPES.NUMBER &&
+          currentCard.type === topCard.type
+        )
+          isJumpIn = true;
+      }
+    }
+
+    if (!isMyTurn && !isJumpIn) return false;
+
+    // --- 2. STANDARD VALIDATION ---
     let isValid = false;
 
-    // 1. Wilds are always valid
-    if (currentCard.color === COLORS.BLACK) isValid = true;
-    // 2. Color Match
-    else if (currentCard.color === activeColor) isValid = true;
-    // 3. Number/Symbol Match
-    else if (currentCard.value !== null && currentCard.value === topCard.value)
-      isValid = true;
-    else if (currentCard.type === topCard.type) isValid = true;
-
-    // 4. Stacking Check (If there is a penalty active)
     if (accumulatedPenalty > 0) {
-      // Must play a +2 on a +2, or +4 on a +4
-      // Simple rule: type must match exactly to stack
-      if (currentCard.type !== topCard.type) isValid = false;
+      if (rules.stacking && currentCard.type === topCard.type) isValid = true;
+      else return false;
+    } else {
+      if (currentCard.color === COLORS.BLACK) isValid = true;
+      else if (currentCard.color === activeColor) isValid = true;
+      else if (
+        currentCard.value !== null &&
+        currentCard.value === topCard.value
+      )
+        isValid = true;
+      else if (
+        currentCard.type !== TYPES.NUMBER &&
+        currentCard.type === topCard.type
+      )
+        isValid = true;
     }
 
     if (!isValid) return false;
 
-    // --- EXECUTE MOVE ---
+    // --- TRIGGER PLAY ANIMATION ---
+    get().triggerAnimation("play", currentCard, playerIndex);
 
-    // 1. Remove from hand
+    // --- 3. EXECUTE MOVE ---
     const newHand = player.hand.filter((_, i) => i !== cardIndex);
-    const newPlayers = [...players];
-    newPlayers[currentPlayerIndex] = { ...player, hand: newHand };
+    let newPlayers = [...players];
+    newPlayers[playerIndex] = { ...player, hand: newHand };
 
-    // 2. Add to discard
+    if (newHand.length > 1) {
+      newPlayers[playerIndex].unoCalled = false;
+    }
+
     const newDiscard = [...discardPile, card];
 
-    // 3. Check Win Condition
     if (newHand.length === 0) {
-      set({ winner: player.name, gameState: "GAME_OVER" });
+      set({
+        winner: player.name,
+        gameState: "GAME_OVER",
+        players: newPlayers,
+        discardPile: newDiscard,
+      });
       return true;
     }
 
-    // 4. Update State
+    if (isJumpIn) set({ currentPlayerIndex: playerIndex });
+
+    // SET THE CHOSEN COLOR HERE
     set({
       players: newPlayers,
       discardPile: newDiscard,
       activeColor:
-        currentCard.color === COLORS.BLACK ? activeColor : currentCard.color, // Keep old color if Wild (for now)
+        chosenColor ||
+        (currentCard.color === COLORS.BLACK ? COLORS.RED : currentCard.color),
     });
 
-    // 5. Apply Card Effects (Skip, Draw 2, etc.)
-    get().applyCardEffect(currentCard);
-
+    get().applyCardEffect(currentCard, playerIndex);
     return true;
   },
 
-  /**
-   * APPLY EFFECT
-   * Handles what the card actually DOES
-   */
-  applyCardEffect: (cardData) => {
-    let nextTurnSkip = 0; // 0 = normal, 1 = skip next player
+  applyCardEffect: (cardData, playedByIndex) => {
+    let nextTurnSkip = 0;
+    const { rules, direction, players } = get();
 
+    // 7-0 Rule Handling
+    if (rules.sevenZero && cardData.type === TYPES.NUMBER) {
+      if (cardData.value === 0) {
+        // 0: Rotate all hands in the direction of play
+        let newPlayers = [...get().players];
+        const hands = newPlayers.map((p) => p.hand);
+        const unoStatuses = newPlayers.map((p) => p.unoCalled); // Swap safety states too!
+
+        newPlayers.forEach((p, idx) => {
+          // If direction is 1 (Clockwise), P1 gets P0's hand, P2 gets P1's hand
+          let fromIdx = (idx - direction + players.length) % players.length;
+          p.hand = hands[fromIdx];
+          p.unoCalled = unoStatuses[fromIdx];
+        });
+        set({ players: newPlayers });
+      } else if (cardData.value === 7) {
+        // 7: Swap with the next player
+        let newPlayers = [...get().players];
+        const nextIdx =
+          (playedByIndex + direction + players.length) % players.length;
+
+        const tempHand = [...newPlayers[playedByIndex].hand];
+        const tempUno = newPlayers[playedByIndex].unoCalled;
+
+        newPlayers[playedByIndex].hand = [...newPlayers[nextIdx].hand];
+        newPlayers[playedByIndex].unoCalled = newPlayers[nextIdx].unoCalled;
+
+        newPlayers[nextIdx].hand = tempHand;
+        newPlayers[nextIdx].unoCalled = tempUno;
+
+        set({ players: newPlayers });
+      }
+    }
+
+    // Standard Actions
     switch (cardData.type) {
       case TYPES.REVERSE:
         set((state) => ({ direction: state.direction * -1 }));
-        // In 2-player, Reverse acts like Skip
-        if (get().players.length === 2) nextTurnSkip = 1;
+        if (get().players.length === 2) nextTurnSkip = 1; // Reverse = Skip in 2-player
         break;
 
       case TYPES.SKIP:
+      case TYPES.SKIP_EVERYONE: // No Mercy
         nextTurnSkip = 1;
         break;
 
       case TYPES.DRAW_2:
         set((state) => ({ accumulatedPenalty: state.accumulatedPenalty + 2 }));
-        // If we don't support stacking, we would apply penalty immediately here
         break;
 
       case TYPES.WILD_DRAW_4:
@@ -168,67 +287,63 @@ const useGameStore = create((set, get) => ({
 
       case TYPES.FLIP:
         set((state) => ({ isDarkSide: !state.isDarkSide }));
-        // When flipping, the active color might change physically,
-        // but for logic we often keep the same "slot" color (e.g. Red flips to Orange)
         break;
     }
 
     get().advanceTurn(nextTurnSkip);
   },
 
-  /**
-   * DRAW CARD
-   * Called when player clicks Deck or cannot play
-   */
   drawCard: (playerId) => {
     const { deck, players, currentPlayerIndex, accumulatedPenalty } = get();
 
-    // Security: Only current player can draw
-    if (players[currentPlayerIndex].id !== playerId) return;
+    // Find who clicked
+    const pIndex = players.findIndex((p) => p.id === playerId);
+
+    // Security check: only current player can draw, unless stacking is active but not allowed
+    if (pIndex !== currentPlayerIndex) return;
 
     let cardsToDraw = accumulatedPenalty > 0 ? accumulatedPenalty : 1;
     let currentDeck = [...deck];
     let drawnCards = [];
 
-    // Draw X cards
+    // Draw logic
     for (let i = 0; i < cardsToDraw; i++) {
-      if (currentDeck.length === 0) {
-        // Reshuffle discard if empty (implement later)
-        break;
-      }
+      if (currentDeck.length === 0) break; // Needs reshuffle logic in a full app
       drawnCards.push(currentDeck.shift());
     }
 
-    // Add to player hand
+    // --- TRIGGER STAGGERED DRAW ANIMATIONS ---
+    drawnCards.forEach((c, idx) => {
+      setTimeout(() => {
+        get().triggerAnimation("draw", c, pIndex);
+      }, idx * 100); // 100ms delay between cards flying
+    });
+
     const newPlayers = [...players];
     newPlayers[currentPlayerIndex].hand = [
       ...newPlayers[currentPlayerIndex].hand,
       ...drawnCards,
     ];
+    newPlayers[currentPlayerIndex].unoCalled = false; // Reset safety if you draw
 
     set({
       deck: currentDeck,
       players: newPlayers,
-      accumulatedPenalty: 0, // Reset penalty after drawing
+      accumulatedPenalty: 0, // Reset penalty
     });
 
-    // End turn
+    // End turn after drawing
     get().advanceTurn();
   },
 
-  /**
-   * ADVANCE TURN
-   * Calculates who goes next based on direction
-   */
   advanceTurn: (skipCount = 0) => {
     const { players, currentPlayerIndex, direction } = get();
     const len = players.length;
 
-    // Logic: Current + (Direction * (1 + skips))
     let steps = 1 + skipCount;
     let nextIndex = currentPlayerIndex + steps * direction;
 
-    // Handle wrapping (Standard Modulo bug fix for negatives)
+    // Modulo math for safe array wrapping (handles negatives)
     nextIndex = ((nextIndex % len) + len) % len;
 
     set({ currentPlayerIndex: nextIndex });

@@ -71,6 +71,16 @@ const Lobby = () => {
 
   const startGame = useGameStore((state) => state.startGame);
 
+  // --- CRITICAL: DEVICE ID FOR MULTIPLAYER ---
+  const [myDeviceId] = useState(() => {
+    let id = localStorage.getItem("uno_device_id");
+    if (!id) {
+      id = "dev_" + Math.random().toString(36).substr(2, 9);
+      localStorage.setItem("uno_device_id", id);
+    }
+    return id;
+  });
+
   // --- LOAD & SAVE ---
   useEffect(() => {
     const savedName = localStorage.getItem("uno_player_name");
@@ -97,16 +107,21 @@ const Lobby = () => {
       setHostId(id);
       setMode("HOST");
       setStatus("Waiting for friends...");
+
+      // Use Device ID instead of "p1"
       setPlayerList([
-        { id: "p1", name: myName, avatarId: myAvatarId, isHost: true },
+        { id: myDeviceId, name: myName, avatarId: myAvatarId, isHost: true },
       ]);
 
       networkManager.setCallback((msgString) => {
         const msg = JSON.parse(msgString);
         if (msg.type === "HELLO_I_AM") {
           setPlayerList((prev) => {
+            // Prevent duplicates if they refresh
+            if (prev.find((p) => p.id === msg.payload.id)) return prev;
+
             const newPlayer = {
-              id: "p" + (prev.length + 1 + Math.random()),
+              id: msg.payload.id,
               name: msg.payload.name,
               avatarId: msg.payload.avatarId,
               isHost: false,
@@ -130,17 +145,22 @@ const Lobby = () => {
       await networkManager.join(joinId);
       setMode("LOBBY");
       setStatus("Connected!");
-      networkManager.send("HELLO_I_AM", { name: myName, avatarId: myAvatarId });
+
+      // Send Device ID
+      networkManager.send("HELLO_I_AM", {
+        id: myDeviceId,
+        name: myName,
+        avatarId: myAvatarId,
+      });
 
       networkManager.setCallback((msgString) => {
         const msg = JSON.parse(msgString);
         if (msg.type === "UPDATE_PLAYER_LIST") setPlayerList(msg.payload.list);
-        if (msg.type === "GAME_START")
-          startGame(
-            msg.payload.rules.variant,
-            msg.payload.players,
-            msg.payload.rules,
-          );
+
+        // CRITICAL: Sync EXACT deck from host
+        if (msg.type === "SYNC_STATE") {
+          useGameStore.getState().syncState(msg.payload);
+        }
       });
     } catch (e) {
       setStatus("Could not find room.");
@@ -148,9 +168,24 @@ const Lobby = () => {
   };
 
   const handleStartGame = () => {
-    // Send Rules + Players to everyone
-    networkManager.send("GAME_START", { rules, players: playerList });
+    // 1. Host generates the game locally
     startGame(rules.variant, playerList, rules);
+    const state = useGameStore.getState();
+
+    // 2. Broadcast the EXACT deck and hands to everyone else
+    networkManager.send("SYNC_STATE", {
+      gameState: "PLAYING",
+      variant: state.variant,
+      rules: state.rules,
+      deck: state.deck,
+      discardPile: state.discardPile,
+      players: state.players,
+      currentPlayerIndex: state.currentPlayerIndex,
+      activeColor: state.activeColor,
+      direction: state.direction,
+      accumulatedPenalty: state.accumulatedPenalty,
+      isDarkSide: state.isDarkSide,
+    });
   };
 
   // --- HELPER COMPONENTS ---
@@ -472,7 +507,7 @@ const Lobby = () => {
                         {p.name}
                       </p>
                       <p className="text-xs text-gray-500 font-bold">
-                        {p.name === myName
+                        {p.id === myDeviceId
                           ? "You"
                           : p.isHost
                             ? "Host"
