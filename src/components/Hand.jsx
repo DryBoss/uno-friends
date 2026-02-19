@@ -1,5 +1,5 @@
 // src/components/Hand.jsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { X } from "lucide-react";
 import useGameStore from "../store/gameStore";
 import Card from "./Card";
@@ -18,8 +18,16 @@ const Hand = ({ myPlayerIndex }) => {
     rules,
   } = useGameStore();
 
-  // State to handle Color Picker modal
   const [pendingWildIndex, setPendingWildIndex] = useState(null);
+  const [screenWidth, setScreenWidth] = useState(1000);
+
+  // --- LIVE SCREEN SIZE TRACKING ---
+  useEffect(() => {
+    setScreenWidth(window.innerWidth);
+    const handleResize = () => setScreenWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const myHand = players[myPlayerIndex]?.hand || [];
   const isMyTurn =
@@ -48,33 +56,27 @@ const Hand = ({ myPlayerIndex }) => {
     return false;
   };
 
-  const handleCardClick = (card, index) => {
+  const handleCardClick = (card, originalIndex) => {
     if (checkPlayable(card)) {
       const currentCard = isDarkSide ? card.back : card;
-
-      // If it's a wild card, open the color picker instead of playing instantly
       if (currentCard.color === "black") {
-        setPendingWildIndex(index);
+        setPendingWildIndex(originalIndex);
         return;
       }
-
-      executePlay(index, null);
+      executePlay(originalIndex, null);
     }
   };
 
-  const executePlay = (index, chosenColor) => {
-    playCard(myPlayerIndex, index, chosenColor);
+  const executePlay = (originalIndex, chosenColor) => {
+    playCard(myPlayerIndex, originalIndex, chosenColor);
     networkManager.send("PLAY_CARD", {
       playerIndex: myPlayerIndex,
-      cardIndex: index,
+      cardIndex: originalIndex,
       chosenColor,
     });
-    setPendingWildIndex(null); // Close modal
+    setPendingWildIndex(null);
   };
 
-  const middleIndex = (myHand.length - 1) / 2;
-
-  // Render the correct color choices based on Light vs Dark side
   const colorOptions = isDarkSide
     ? [
         { id: "teal", bg: "bg-[#00897B]", border: "border-[#004D40]" },
@@ -89,27 +91,47 @@ const Hand = ({ myPlayerIndex }) => {
         { id: "yellow", bg: "bg-[#FFB300]", border: "border-[#FF8F00]" },
       ];
 
+  // --- IMPROVED VISIBILITY MATH ---
+  const scale = screenWidth < 768 ? 0.75 : 1;
+  const effectiveWidth = screenWidth / scale;
+
+  // REQUIRE at least 50px of visible space per card (more than half the card's width!)
+  const maxCardsPerRow = Math.max(4, Math.floor((effectiveWidth - 100) / 50));
+
+  const numRows = Math.ceil(myHand.length / maxCardsPerRow) || 1;
+  const cardsPerRow = Math.ceil(myHand.length / numRows);
+
+  const rows = [];
+  for (let i = 0; i < numRows; i++) {
+    rows.push(
+      myHand.slice(i * cardsPerRow, (i + 1) * cardsPerRow).map((card, idx) => ({
+        card,
+        originalIndex: i * cardsPerRow + idx,
+      })),
+    );
+  }
+
   return (
     <>
       {/* COLOR PICKER MODAL */}
       {pendingWildIndex !== null && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-[#FFF8E1] p-6 rounded-3xl border-4 border-[#FFECB3] shadow-2xl flex flex-col items-center relative">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in px-4">
+          <div className="bg-[#FFF8E1] p-6 rounded-3xl border-4 border-[#FFECB3] shadow-2xl flex flex-col items-center relative w-full max-w-[300px]">
             <button
               onClick={() => setPendingWildIndex(null)}
               className="absolute -top-4 -right-4 bg-red-500 text-white p-2 rounded-full border-4 border-white shadow-md hover:scale-110 active:scale-95"
             >
               <X size={20} strokeWidth={4} />
             </button>
-            <h3 className="text-2xl font-black text-[#3E2723] mb-6">
+            <h3 className="text-2xl font-black text-[#3E2723] mb-6 text-center">
               Choose Color
             </h3>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 w-full">
               {colorOptions.map((color) => (
                 <button
                   key={color.id}
                   onClick={() => executePlay(pendingWildIndex, color.id)}
-                  className={`w-20 h-20 rounded-2xl ${color.bg} ${color.border} border-b-8 shadow-lg active:border-b-0 active:translate-y-2 hover:brightness-110 transition-all`}
+                  className={`w-full aspect-square rounded-2xl ${color.bg} ${color.border} border-b-8 shadow-lg active:border-b-0 active:translate-y-2 hover:brightness-110 transition-all`}
                 ></button>
               ))}
             </div>
@@ -117,44 +139,67 @@ const Hand = ({ myPlayerIndex }) => {
         </div>
       )}
 
-      {/* CARD HAND */}
-      <div className="absolute bottom-0 left-0 w-full h-48 flex justify-center items-end pb-6 overflow-visible pointer-events-none z-50">
-        <div className="flex justify-center items-end pointer-events-auto relative h-full">
-          {myHand.map((card, index) => {
-            const isPlayable = checkPlayable(card);
-            const overlapOffset =
-              myHand.length > 8 ? (myHand.length - 8) * 3 : 0;
-            const marginLeft = index === 0 ? "0px" : `-${20 + overlapOffset}px`;
-            const rotationOffset = (index - middleIndex) * 3;
-            const rotation = Math.max(-25, Math.min(25, rotationOffset));
-            const translateY = Math.abs(index - middleIndex) * 2;
+      {/* CARD HAND SYSTEM */}
+      <div className="absolute bottom-0 left-0 w-full flex flex-col items-center justify-end pointer-events-none z-50">
+        <div className="relative w-full pb-4 sm:pb-8 flex flex-col items-center justify-end scale-[0.75] sm:scale-100 origin-bottom">
+          {rows.map((row, rowIndex) => {
+            const rowMiddleIndex = (row.length - 1) / 2;
+
+            // Reduced vertical overlap! Back rows are now much higher and easier to see.
+            const marginTop = rowIndex === 0 ? "0px" : "-45px";
 
             return (
               <div
-                key={card.id}
-                style={{
-                  marginLeft,
-                  zIndex: index,
-                  transform: `rotate(${rotation}deg) translateY(${translateY}px)`,
-                  transformOrigin: "bottom center",
-                }}
-                className="relative"
+                key={rowIndex}
+                style={{ marginTop, zIndex: rowIndex * 10 }}
+                className="flex justify-center items-end pointer-events-auto relative"
               >
-                <div
-                  className={`transition-all duration-300 group
-                  ${isPlayable ? "hover:-translate-y-12 hover:scale-110 cursor-pointer" : "opacity-80 brightness-75"}
-                `}
-                >
-                  <Card
-                    card={card}
-                    isDarkSide={isDarkSide}
-                    onClick={() => handleCardClick(card, index)}
-                    isPlayable={isPlayable}
-                  />
-                  {isPlayable && (
-                    <div className="absolute inset-0 bg-green-400 blur-xl opacity-0 group-hover:opacity-40 rounded-xl -z-10 transition-opacity pointer-events-none"></div>
-                  )}
-                </div>
+                {row.map((item, index) => {
+                  const isPlayable = checkPlayable(item.card);
+
+                  // Reduced horizontal overlap! Capped at 46px, meaning 50px is ALWAYS showing.
+                  const overlap = Math.min(46, 5 + row.length * 3.5);
+                  const marginLeft = index === 0 ? "0px" : `-${overlap}px`;
+
+                  // Gentler fan angle so tilted corners don't cover neighboring numbers
+                  let rotation = (index - rowMiddleIndex) * 2;
+                  rotation = Math.max(-20, Math.min(20, rotation));
+
+                  const translateY =
+                    Math.abs(index - rowMiddleIndex) *
+                    (row.length > 10 ? 1 : 2);
+
+                  return (
+                    <div
+                      key={item.card.id}
+                      style={{
+                        marginLeft,
+                        zIndex: item.originalIndex,
+                        transform: `rotate(${rotation}deg) translateY(${translateY}px)`,
+                        transformOrigin: "bottom center",
+                      }}
+                      className="relative group hover:z-[100]"
+                    >
+                      <div
+                        className={`transition-all duration-300 group
+                        ${isPlayable ? "hover:-translate-y-12 sm:hover:-translate-y-16 hover:scale-110 cursor-pointer shadow-lg" : "opacity-90 brightness-75"}
+                      `}
+                      >
+                        <Card
+                          card={item.card}
+                          isDarkSide={isDarkSide}
+                          onClick={() =>
+                            handleCardClick(item.card, item.originalIndex)
+                          }
+                          isPlayable={isPlayable}
+                        />
+                        {isPlayable && (
+                          <div className="absolute inset-0 bg-green-400 blur-xl opacity-0 group-hover:opacity-40 rounded-xl -z-10 transition-opacity pointer-events-none"></div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
