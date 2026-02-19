@@ -43,20 +43,23 @@ const useGameStore = create((set, get) => ({
   },
 
   // --- ANIMATION TRIGGER ---
+  // --- ANIMATION TRIGGER ---
   triggerAnimation: (type, card, playerIndex) => {
-    const isMe = playerIndex === get().myPlayerIndex;
     const animId = Math.random().toString();
 
+    // We store the actual playerIndex now instead of a broken 'isMe' calculation
     set((state) => ({
-      animations: [...state.animations, { id: animId, type, card, isMe }],
+      animations: [
+        ...state.animations,
+        { id: animId, type, card, playerIndex },
+      ],
     }));
 
-    // Remove the ghost card after the CSS animation finishes (400ms)
     setTimeout(() => {
       set((state) => ({
         animations: state.animations.filter((a) => a.id !== animId),
       }));
-    }, 400);
+    }, 600);
   },
 
   startGame: (variant, players, rules) => {

@@ -6,6 +6,7 @@ import Hand from "./Hand";
 import Card from "./Card";
 import networkManager from "../network/NetworkManager";
 
+// We reuse the animal logic so the table knows how to draw them
 const ANIMAL_AVATARS = [
   { id: "bear", emoji: "🐻", color: "bg-amber-200" },
   { id: "panda", emoji: "🐼", color: "bg-slate-200" },
@@ -26,41 +27,43 @@ const ANIMAL_AVATARS = [
 ];
 
 // --- THE ANIMATION COMPONENT ---
-const FlyingCard = ({ anim, isDarkSide }) => {
+const FlyingCard = ({ anim, isDarkSide, myPlayerIndex }) => {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    // 1 frame delay ensures the CSS transition triggers smoothly
-    const frame = requestAnimationFrame(() =>
-      requestAnimationFrame(() => setMounted(true)),
-    );
-    return () => cancelAnimationFrame(frame);
+    // A tiny timeout ensures the browser calculates the start position before transitioning
+    const timer = setTimeout(() => setMounted(true), 20);
+    return () => clearTimeout(timer);
   }, []);
 
-  // Spatial approximations for where cards should fly
-  const DECK_POS = "translate(-80px, 0px) scale(0.8) rotate(-12deg)";
-  const DISCARD_POS = "translate(80px, 0px) scale(1) rotate(15deg)";
-  const ME_POS = "translate(0px, 40vh) scale(0.5)";
-  const OPPONENT_POS = "translate(0px, -40vh) scale(0.5)";
+  // Now the card calculates who "Me" is based on your rock-solid Device ID
+  const isMe = anim.playerIndex === myPlayerIndex;
+
+  const DECK_POS = "translate(-100px, 0px) scale(0.8) rotate(-12deg)";
+  const DISCARD_POS = "translate(100px, 0px) scale(1) rotate(15deg)";
+  const ME_POS = "translate(0px, 45vh) scale(0.5) rotate(0deg)";
+  const OPPONENT_POS = "translate(0px, -45vh) scale(0.5) rotate(0deg)";
 
   let startPos, endPos;
 
   if (anim.type === "play") {
-    startPos = anim.isMe ? ME_POS : OPPONENT_POS;
+    startPos = isMe ? ME_POS : OPPONENT_POS;
     endPos = DISCARD_POS;
   } else {
     // draw
     startPos = DECK_POS;
-    endPos = anim.isMe ? ME_POS : OPPONENT_POS;
+    endPos = isMe ? ME_POS : OPPONENT_POS;
   }
 
-  // If opponent draws, hide the face of the card from us
-  const showBack = anim.type === "draw" && !anim.isMe;
+  const showBack = anim.type === "draw" && !isMe;
 
   return (
     <div
-      className="absolute top-1/2 left-1/2 -ml-12 -mt-18 z-[999] pointer-events-none drop-shadow-2xl transition-all duration-300 ease-out"
-      style={{ transform: mounted ? endPos : startPos }}
+      className="absolute top-1/2 left-1/2 -ml-12 -mt-18 z-[9999] pointer-events-none drop-shadow-[0_30px_30px_rgba(0,0,0,0.6)] transition-all duration-[600ms] ease-in-out"
+      style={{
+        transform: mounted ? endPos : startPos,
+        opacity: mounted ? 1 : 0.5,
+      }}
     >
       {showBack ? (
         <div className="w-24 h-36 rounded-xl border-4 border-white shadow-xl flex items-center justify-center bg-[#3E2723]">
@@ -152,7 +155,12 @@ const GameTable = () => {
     <div className="fixed inset-0 w-full h-full bg-[#3E2723] flex flex-col items-center justify-between font-sans overflow-hidden select-none">
       {/* --- ANIMATION OVERLAY --- */}
       {animations.map((anim) => (
-        <FlyingCard key={anim.id} anim={anim} isDarkSide={isDarkSide} />
+        <FlyingCard
+          key={anim.id}
+          anim={anim}
+          isDarkSide={isDarkSide}
+          myPlayerIndex={myPlayerIndex}
+        />
       ))}
 
       {/* --- BACKGROUND TEXTURES --- */}
